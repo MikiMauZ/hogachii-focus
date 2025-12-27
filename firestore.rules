@@ -10,40 +10,61 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    // A user is a member of a family if their UID is in the family's members list.
+    // A user is an approved member of a family if their UID is in the family's 'members' list.
     function isFamilyMember(familyId) {
       return isSignedIn() && get(/databases/$(database)/documents/families/$(familyId)).data.members.hasAny([request.auth.uid]);
+    }
+    
+    // A user is the owner of the family.
+    function isFamilyOwner(familyId) {
+        return isSignedIn() && get(/databases/$(database)/documents/families/$(familyId)).data.ownerId == request.auth.uid;
+    }
+    
+    // A user has requested to join a family and is in 'pendingMembers' list.
+    function isPendingMember(familyId) {
+       return isSignedIn() && get(/databases/$(database)/documents/families/$(familyId)).data.pendingMembers.hasAny([request.auth.uid]);
     }
 
     // Rules for the 'users' collection
     match /users/{userId} {
-      // Any signed-in user can read any user's profile (consider restricting this if privacy is a concern).
       // A user can always read their own profile.
-      allow read: if isOwner(userId) || isSignedIn();
-      // A user can only create their own profile document.
-      allow create: if isOwner(userId);
-      // A user can only update their own profile document.
-      allow update: if isOwner(userId);
-      // Deleting users is not allowed.
-      allow delete: if false;
+      // An approved family member can read the profiles of other members.
+      allow read: if isOwner(userId) || (resource.data.familyId != null && isFamilyMember(resource.data.familyId));
+      
+      // A user can create their own profile document on signup.
+      // The family owner can create new profiles for members within their family.
+      allow create: if isOwner(userId) || (request.resource.data.familyId != null && isFamilyOwner(request.resource.data.familyId));
+
+      // A user can update their own profile.
+      // A family owner can update the familyId of a user when approving them.
+      allow update: if isOwner(userId) || (isFamilyOwner(resource.data.familyId));
+
+      // Deleting users is restricted to family owners for virtual profiles.
+      allow delete: if isFamilyOwner(resource.data.familyId) && resource.data.email == null;
     }
 
     // Rules for the 'families' collection and its subcollections
     match /families/{familyId} {
-      // A user can read a family document if they are a member.
-      allow read: if isFamilyMember(familyId);
-      // A user can create a family if they are signed in and they set themselves as the owner.
+      // A user can read a family document if they are an approved or pending member.
+      allow read: if isFamilyMember(familyId) || isPendingMember(familyId);
+      
+      // A user can create a family if they are signed in and set themselves as the owner.
       allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
-      // For now, any family member can update the family document.
-      // In a real app, you'd want more granular control (e.g., only owner can add/remove members).
-      allow update: if isFamilyMember(familyId);
-       // Deleting families is not allowed through this rule.
-      allow delete: if isFamilyMember(familyId) && resource.data.members.size() == 1 && resource.data.members[0] == request.auth.uid;
+      
+      // Update rules for a family document
+      allow update: if 
+          // The owner can manage members and pending members.
+          isFamilyOwner(familyId) || 
+          // A user can request to join by adding themselves to 'pendingMembers'.
+          (isSignedIn() && request.resource.data.pendingMembers == resource.data.pendingMembers.concat([request.auth.uid]));
+
+      // Deleting families is restricted to the owner when they are the last member.
+      allow delete: if isFamilyOwner(familyId) && resource.data.members.size() == 1;
 
 
       // Rules for all subcollections within a family document
       match /{subcollection}/{docId} {
-        // Any family member can read and write to any document in any subcollection.
+        // Any approved family member can read and write to any document in any subcollection.
         allow read, write: if isFamilyMember(familyId);
       }
     }
